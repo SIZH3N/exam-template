@@ -1,5 +1,15 @@
 ---
-# Install Monitoring. It must listen .
-# Add Prometheus as a datasource.
-# Add one dashboard with CPU and memory.
-[]
+- name: Include Prometheus tasks
+  ansible.builtin.include_role:
+    name: prometheus
+  tags: prometheus
+
+- name: Include Node Exporter tasks
+  ansible.builtin.include_role:
+    name: node_exporter
+  tags: node_exporter
+
+- name: Include Grafana tasks
+  ansible.builtin.include_role:
+    name: grafana
+  tags: grafana
