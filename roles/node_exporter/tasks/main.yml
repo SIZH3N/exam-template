@@ -1,0 +1,90 @@
+---
+- name: Deploy and configure Node Exporter with error handling and rollback
+  block:
+    - name: Create node_exporter system group
+      ansible.builtin.group:
+        name: node_exporter
+        system: true
+        state: present
+
+    - name: Create node_exporter system user
+      ansible.builtin.user:
+        name: node_exporter
+        group: node_exporter
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Check if node_exporter binary already exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/node_exporter
+      register: node_exporter_binary_check
+
+    - name: Download Node Exporter archive
+      ansible.builtin.command:
+        cmd: "curl -fsSL -o /tmp/{{ node_exporter_archive }}.tar.gz {{ node_exporter_download_url }}"
+        creates: "/tmp/{{ node_exporter_archive }}.tar.gz"
+      when: not node_exporter_binary_check.stat.exists
+
+    - name: Unpack Node Exporter archive
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ node_exporter_archive }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+      when: not node_exporter_binary_check.stat.exists
+
+    - name: Copy Node Exporter binary to /usr/local/bin
+      ansible.builtin.copy:
+        src: "/tmp/{{ node_exporter_archive }}/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      when: not node_exporter_binary_check.stat.exists
+
+    - name: Template Node Exporter systemd service unit
+      ansible.builtin.template:
+        src: node_exporter.service.j2
+        dest: /etc/systemd/system/node_exporter.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - reload systemd
+        - restart node_exporter
+
+    - name: Flush handlers to apply node_exporter systemd unit
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Node Exporter is enabled and started
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: started
+        enabled: true
+
+    - name: Validate Node Exporter metrics endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+        status_code: 200
+      register: node_health
+      until: node_health.status == 200
+      retries: 5
+      delay: 2
+
+  rescue:
+    - name: Log error alert for Node Exporter failure
+      ansible.builtin.debug:
+        msg: "CRITICAL: Node Exporter deployment failed. Checking service status and logs..."
+
+    - name: Fail task with diagnostic report
+      ansible.builtin.fail:
+        msg: "Node Exporter deployment failed. Check systemctl status node_exporter."
+
+  always:
+    - name: Remove temporary Node Exporter download archive
+      ansible.builtin.file:
+        path: "/tmp/{{ node_exporter_archive }}.tar.gz"
+        state: absent
+      failed_when: false
