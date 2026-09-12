@@ -1,0 +1,6 @@
+---
+# Grafana role defaults
+grafana_port: 3000
+prometheus_port: 9090
+grafana_admin_user: "admin"
+grafana_admin_password: "admin_password123"

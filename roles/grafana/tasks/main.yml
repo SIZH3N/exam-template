@@ -1,0 +1,137 @@
+---
+- name: Deploy and configure Grafana with error handling and rollback
+  block:
+    - name: Update apt cache and install essential dependencies
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        pkg:
+          - curl
+          - apt-transport-https
+          - software-properties-common
+          - gnupg
+        state: present
+
+    - name: Ensure keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Grafana GPG key using curl
+      ansible.builtin.shell:
+        cmd: "curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg"
+        creates: /etc/apt/keyrings/grafana.gpg
+
+    - name: Add Grafana repository to sources.list.d
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/grafana.list
+        content: "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main\n"
+        mode: "0644"
+
+    - name: Install Grafana OSS package
+      ansible.builtin.apt:
+        name: grafana
+        state: present
+        update_cache: true
+
+    - name: Backup Grafana ini configuration
+      ansible.builtin.copy:
+        src: /etc/grafana/grafana.ini
+        dest: /etc/grafana/grafana.ini.bak
+        remote_src: true
+        mode: "0640"
+      failed_when: false
+
+    - name: Configure Grafana HTTP port and admin credentials in grafana.ini
+      ansible.builtin.lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        insertafter: "{{ item.after | default(omit) }}"
+      loop:
+        - { regexp: '^;\?http_port =', line: 'http_port = {{ grafana_port }}' }
+        - { regexp: '^;\?admin_user =', line: 'admin_user = {{ grafana_admin_user }}' }
+        - { regexp: '^;\?admin_password =', line: 'admin_password = {{ grafana_admin_password }}' }
+      no_log: true
+      notify: restart grafana
+
+    - name: Ensure Grafana provisioning directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: grafana
+        mode: "0770"
+      loop:
+        - /etc/grafana/provisioning/datasources
+        - /etc/grafana/provisioning/dashboards
+        - /var/lib/grafana/dashboards
+
+    - name: Provision Grafana Prometheus datasource
+      ansible.builtin.template:
+        src: grafana-datasource.yml.j2
+        dest: /etc/grafana/provisioning/datasources/prometheus.yaml
+        owner: root
+        group: grafana
+        mode: "0640"
+      notify: restart grafana
+
+    - name: Provision Grafana dashboard provider
+      ansible.builtin.template:
+        src: grafana-dashboards-provider.yml.j2
+        dest: /etc/grafana/provisioning/dashboards/dashboards.yaml
+        owner: root
+        group: grafana
+        mode: "0640"
+      notify: restart grafana
+
+    - name: Copy CPU and Memory dashboard JSON file
+      ansible.builtin.copy:
+        src: cpu_memory_dashboard.json
+        dest: /var/lib/grafana/dashboards/cpu_memory_dashboard.json
+        owner: root
+        group: grafana
+        mode: "0644"
+      notify: restart grafana
+
+    - name: Flush handlers to restart grafana if configuration changed
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Grafana service is enabled and started
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: started
+        enabled: true
+
+    - name: Validate Grafana health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+        status_code: 200
+      register: grafana_health
+      until: grafana_health.status == 200
+      retries: 5
+      delay: 2
+
+  rescue:
+    - name: Log error alert for Grafana failure
+      ansible.builtin.debug:
+        msg: "CRITICAL: Grafana deployment failed. Initiating rollback of grafana.ini..."
+
+    - name: Restore Grafana ini backup if available
+      ansible.builtin.copy:
+        src: /etc/grafana/grafana.ini.bak
+        dest: /etc/grafana/grafana.ini
+        remote_src: true
+        mode: "0640"
+      failed_when: false
+
+    - name: Attempt restart of grafana-server
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
+      failed_when: false
+
+    - name: Fail task with diagnostic report
+      ansible.builtin.fail:
+        msg: "Grafana deployment failed and rollback actions were executed. Check systemctl status grafana-server."
