@@ -1,0 +1,158 @@
+---
+- name: Deploy and configure Prometheus with error handling and rollback
+  block:
+    - name: Update apt cache and install essential dependencies
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        pkg:
+          - curl
+          - wget
+          - tar
+        state: present
+
+    - name: Create prometheus system group
+      ansible.builtin.group:
+        name: prometheus
+        system: true
+        state: present
+
+    - name: Create prometheus system user
+      ansible.builtin.user:
+        name: prometheus
+        group: prometheus
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+        state: present
+
+    - name: Create Prometheus directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+      loop:
+        - /etc/prometheus
+        - /var/lib/prometheus
+
+    - name: Check if Prometheus binary already exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/prometheus
+      register: prometheus_binary_check
+
+    - name: Download Prometheus binary archive
+      ansible.builtin.command:
+        cmd: "curl -fsSL -o /tmp/{{ prometheus_archive }}.tar.gz {{ prometheus_download_url }}"
+        creates: "/tmp/{{ prometheus_archive }}.tar.gz"
+      when: not prometheus_binary_check.stat.exists
+
+    - name: Unpack Prometheus binary archive
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ prometheus_archive }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+      when: not prometheus_binary_check.stat.exists
+
+    - name: Copy Prometheus binaries to /usr/local/bin
+      ansible.builtin.copy:
+        src: "/tmp/{{ prometheus_archive }}/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: "0755"
+        owner: root
+        group: root
+        remote_src: true
+      loop:
+        - prometheus
+        - promtool
+      when: not prometheus_binary_check.stat.exists
+
+    - name: Copy Prometheus console libraries
+      ansible.builtin.copy:
+        src: "/tmp/{{ prometheus_archive }}/{{ item }}"
+        dest: /etc/prometheus/
+        owner: prometheus
+        group: prometheus
+        mode: "0755"
+        remote_src: true
+      loop:
+        - consoles
+        - console_libraries
+      when: not prometheus_binary_check.stat.exists
+
+    - name: Backup existing Prometheus configuration if present
+      ansible.builtin.copy:
+        src: /etc/prometheus/prometheus.yml
+        dest: /etc/prometheus/prometheus.yml.bak
+        remote_src: true
+        mode: "0644"
+      failed_when: false
+
+    - name: Template Prometheus configuration
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: "0644"
+      notify: restart prometheus
+
+    - name: Template Prometheus systemd service unit
+      ansible.builtin.template:
+        src: prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - reload systemd
+        - restart prometheus
+
+    - name: Flush handlers to ensure service unit is loaded
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure Prometheus is enabled and started
+      ansible.builtin.systemd:
+        name: prometheus
+        state: started
+        enabled: true
+
+    - name: Validate Prometheus health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/-/healthy"
+        status_code: 200
+      register: prom_health
+      until: prom_health.status == 200
+      retries: 5
+      delay: 2
+
+  rescue:
+    - name: Log error alert for Prometheus failure
+      ansible.builtin.debug:
+        msg: "CRITICAL: Prometheus deployment failed. Initiating automated recovery & rollback..."
+
+    - name: Restore Prometheus configuration backup if present
+      ansible.builtin.copy:
+        src: /etc/prometheus/prometheus.yml.bak
+        dest: /etc/prometheus/prometheus.yml
+        remote_src: true
+        mode: "0644"
+      failed_when: false
+
+    - name: Attempt restarting Prometheus with restored config
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+      failed_when: false
+
+    - name: Fail task with diagnostic report
+      ansible.builtin.fail:
+        msg: "Prometheus deployment failed and rollback actions were executed. Check systemctl status prometheus or journalctl -u prometheus."
+
+  always:
+    - name: Remove temporary download archive
+      ansible.builtin.file:
+        path: "/tmp/{{ prometheus_archive }}.tar.gz"
+        state: absent
+      failed_when: false

@@ -1,0 +1,7 @@
+---
+# Prometheus role defaults
+prometheus_version: "2.51.0"
+prometheus_archive: "prometheus-{{ prometheus_version }}.linux-amd64"
+prometheus_download_url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/{{ prometheus_archive }}.tar.gz"
+prometheus_port: 9090
+node_exporter_port: 9100
